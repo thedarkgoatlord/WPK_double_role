@@ -37,7 +37,7 @@ screen screen_wolf_turn(wolf_indices):
             color COL_SUB
             font FONT
 
-        $ alive_idxs = [idx for idx in alive_players(players) if not is_wolf(players[idx])]
+        $ alive_idxs = [idx for idx in alive_players(players)]
         hbox:
             xalign 0.5
             spacing 40

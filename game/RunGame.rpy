@@ -194,12 +194,20 @@ label night_phase:
 
         call screen screen_hunter_status(hunter_idx, hunter_can_shoot)
 
-    # 结算当夜死亡（守卫守护的目标不死）
+    # 结算当夜死亡（守卫守护的目标不死，奶穿机制）
     python:
         for idx in list(night_deaths):
-            # 守卫只能挡狼人刀，不能挡女巫毒
-            if idx == guard_protected_this_night and not players[idx]["poisoned_by_witch"]:
-                night_deaths.remove(idx)
+            # 奶穿机制：如果同时被守卫守护且被女巫解药救，则仍然死亡
+            saved_by_witch = (idx == _last_witch_target and witch_save_used)
+            guarded = (idx == guard_protected_this_night)
+
+            if guarded and not players[idx]["poisoned_by_witch"]:
+                if saved_by_witch:
+                    # 奶穿：守卫 + 解药 → 仍然死亡（不移除）
+                    pass
+                else:
+                    # 只有守卫生效 → 挡刀
+                    night_deaths.remove(idx)
 
         for idx in night_deaths:
             # 判断本次死亡的是哪一层身份
