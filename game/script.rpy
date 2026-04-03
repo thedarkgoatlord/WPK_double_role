@@ -70,7 +70,10 @@ label distribute_roles:
     # 同时展示上下两张牌
     $ top_role    = assignment[(current_reveal_player - 1) * 2]
     $ bottom_role = assignment[(current_reveal_player - 1) * 2 + 1]
-    call screen screen_show_both_roles(current_reveal_player, top_role, bottom_role)
+    $ result = renpy.call_screen("screen_show_both_roles", current_reveal_player, top_role, bottom_role)
+    if result:
+        $ assignment[(current_reveal_player - 1) * 2] = result[0]
+        $ assignment[(current_reveal_player - 1) * 2 + 1] = result[1]
 
     $ current_reveal_player += 1
     jump distribute_roles
@@ -205,10 +208,14 @@ screen screen_show_both_roles(player_num, top_role, bottom_role):
 
     add Solid("#080810")
 
-    $ top_cn    = role_cn(top_role)
-    $ bottom_cn = role_cn(bottom_role)
-    $ top_col   = role_color(top_role)
-    $ bot_col   = role_color(bottom_role)
+    default swapped = False
+    $ display_top    = bottom_role if swapped else top_role
+    $ display_bottom = top_role if swapped else bottom_role
+
+    $ top_cn    = role_cn(display_top)
+    $ bottom_cn = role_cn(display_bottom)
+    $ top_col   = role_color(display_top)
+    $ bot_col   = role_color(display_bottom)
 
     vbox:
         xalign 0.5
@@ -268,6 +275,20 @@ screen screen_show_both_roles(player_num, top_role, bottom_role):
                         color "#111111"
                         font "SourceHanSansLite.ttf"
 
+        button:
+            xsize 260
+            ysize 70
+            background Frame(Solid("#444488"), 0, 0)
+            hover_background Frame(Solid("#6666aa"), 0, 0)
+            action ToggleScreenVariable("swapped")
+            xalign 0.5
+            text "交换上下牌":
+                xalign 0.5
+                yalign 0.5
+                size 30
+                color "#ffffff"
+                font "SourceHanSansLite.ttf"
+
         text "请记住你的两张身份牌，然后点击继续":
             xalign 0.5
             size 32
@@ -279,7 +300,7 @@ screen screen_show_both_roles(player_num, top_role, bottom_role):
             ysize 85
             background Frame(Solid("#2255aa"), 0, 0)
             hover_background Frame(Solid("#3366cc"), 0, 0)
-            action Return()
+            action Return((display_top, display_bottom))
             xalign 0.5
             text "已记住":
                 xalign 0.5

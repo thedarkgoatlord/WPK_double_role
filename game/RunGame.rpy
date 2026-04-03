@@ -17,31 +17,55 @@ init python:
             result.append({
                 "top":    assignment[2 * i],
                 "bottom": assignment[2 * i + 1],
-                "alive":  True,
+                "top_alive": True,
+                "bottom_alive": True,
                 "poisoned_by_witch": False,
+                "idiot_revealed": False,   # 白痴是否已翻牌
             })
         return result
 
     WOLF_ROLES  = {"Werewolf", "Hidden Werewolf"}
     CIVIL_ROLES = {"Villager", "Duplicate"}
+    ELDER_ROLES = {"Elder"}
 
     def has_role(player, role):
         return player["top"] == role or player["bottom"] == role
 
     def is_wolf(player):
-        return player["top"] in WOLF_ROLES or player["bottom"] in WOLF_ROLES
+        return (
+            (player["top_alive"] and player["top"] in WOLF_ROLES) or
+            (not player["top_alive"] and player["bottom_alive"] and player["bottom"] in WOLF_ROLES)
+        )
+    def is_wolf_night(player):
+        # 决定晚上是否睁眼
+        return is_wolf(player) or (player["bottom_alive"] and player["bottom"] == "Hidden Werewolf")
 
     def is_double_civil(player):
         return player["top"] in CIVIL_ROLES and player["bottom"] in CIVIL_ROLES
 
+    def is_elder(player):
+        return (
+            (player["top_alive"] and player["top"] in ELDER_ROLES) or
+            (player["bottom_alive"] and player["bottom"] in ELDER_ROLES)
+        )
+
     def alive_players(players):
-        return [i for i, p in enumerate(players) if p["alive"]]
+        return [i for i, p in enumerate(players) if (p["top_alive"] or p["bottom_alive"])]
 
     def alive_with_role(players, role):
         return [i for i in alive_players(players) if has_role(players[i], role)]
 
     def roles_display(player):
-        return "{} / {}".format(role_cn(player["top"]), role_cn(player["bottom"]))
+        top_role = role_cn(player["top"])
+        bottom_role = role_cn(player["bottom"])
+
+        if not player["top_alive"]:
+            top_role = "{s}" + top_role + "{/s}"
+
+        if not player["bottom_alive"]:
+            bottom_role = "{s}" + bottom_role + "{/s}"
+
+        return "{} / {}".format(top_role, bottom_role)
 
 
 # ── 游戏全局变量 ──────────────────────────────────────────────────────────────
@@ -54,6 +78,10 @@ default wolf_kill_target      = -1
 default guard_last_target     = -1
 default guard_protected_this_night = -1
 default game_over             = False
+default game_log            = []   # 每天/每夜的事件记录
+default current_phase_log   = None # 当前阶段临时记录
+default silenced_players = []
+default _last_witch_target = None
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -76,8 +104,11 @@ label begin_game:
 label night_phase:
     $ night_count += 1
     $ night_deaths = []
+    $ current_phase_log = {"phase": "night", "day": night_count, "events": []}
+    $ current_phase_log["actions"] = []
     $ wolf_kill_target = -1
     $ guard_protected_this_night = -1
+    $ silenced_players = []
 
     call screen screen_night_transition(night_count)
 
@@ -88,47 +119,220 @@ label night_phase:
             call screen screen_civil_recognize(double_civil_indices)
 
     # 狼人睁眼
-    $ wolf_indices = [i for i in alive_players(players) if is_wolf(players[i])]
+    $ wolf_indices = [i for i in alive_players(players) if is_wolf_night(players[i])]
     if wolf_indices:
         call screen screen_wolf_turn(wolf_indices)
+        if wolf_kill_target >= 0:
+            $ current_phase_log["actions"].append({
+                "type": "wolf_kill",
+                "target": wolf_kill_target,
+                "participants": list(wolf_indices)
+            })
 
     # 预言家查验
     $ prophet_indices = alive_with_role(players, "Prophet")
     if prophet_indices:
-        call screen screen_prophet_turn(prophet_indices[0])
+        $ p_idx = prophet_indices[0]
+        call screen screen_prophet_turn(p_idx)
+        $ checked_target = _return
+
+        if checked_target is not None:
+            $ result = is_wolf(players[checked_target])
+            $ current_phase_log["actions"].append({
+                "type": "prophet_check",
+                "actor": p_idx,
+                "target": checked_target,
+                "result": result
+            })
 
     # 守卫守护
     $ guard_indices = alive_with_role(players, "Guard")
     if guard_indices:
-        call screen screen_guard_turn(guard_indices[0])
+        $ g_idx = guard_indices[0]
+        call screen screen_guard_turn(g_idx)
+        $ current_phase_log["actions"].append({
+            "type": "guard",
+            "target": guard_protected_this_night
+        })
 
     # 女巫行动
     $ witch_indices = alive_with_role(players, "Witch")
     if witch_indices:
-        call screen screen_witch_turn(witch_indices[0])
+        $ w_idx = witch_indices[0]
+        call screen screen_witch_turn(w_idx)
+        $ current_phase_log["actions"].append({
+            "type": "witch",
+            "save_used": witch_save_used,
+            "poison_used": witch_poison_used,
+            "target": _last_witch_target
+        })
+
+    # 禁言长老行动
+    $ elder_indices = [i for i in alive_players(players) if is_elder(players[i])]
+    if elder_indices:
+        $ e_idx = elder_indices[0]
+        call screen screen_elder_turn(e_idx)
+        if silenced_players:
+            $ current_phase_log["actions"].append({
+                "type": "elder",
+                "targets": list(silenced_players)
+            })
 
     # 猎人开枪状态告知
     $ hunter_indices = alive_with_role(players, "Hunter")
     if hunter_indices:
         $ hunter_idx = hunter_indices[0]
-        $ hunter_can_shoot = not players[hunter_idx]["poisoned_by_witch"]
+
+        # 当前存活命数
+        $ lives = int(players[hunter_idx]["top_alive"]) + int(players[hunter_idx]["bottom_alive"])
+
+        # 判断这一夜是否会死亡（被刀或被毒）
+        $ will_die_tonight = (hunter_idx in night_deaths)
+
+        # 判断死亡的是否是猎人这一层（只要还有命且本夜被击杀，就视为触发）
+        $ hunter_can_shoot = (will_die_tonight and not players[hunter_idx]["poisoned_by_witch"])
+
         call screen screen_hunter_status(hunter_idx, hunter_can_shoot)
 
     # 结算当夜死亡（守卫守护的目标不死）
     python:
         for idx in list(night_deaths):
-            if idx == guard_protected_this_night:
+            # 守卫只能挡狼人刀，不能挡女巫毒
+            if idx == guard_protected_this_night and not players[idx]["poisoned_by_witch"]:
                 night_deaths.remove(idx)
+
         for idx in night_deaths:
-            players[idx]["alive"] = False
+            # 判断本次死亡的是哪一层身份
+            if players[idx]["top_alive"]:
+                dying_role = players[idx]["top"]
+                cause = "poison" if players[idx]["poisoned_by_witch"] else "wolf"
+                current_phase_log["events"].append({
+                    "player": idx,
+                    "role": dying_role,
+                    "layer": "top",
+                    "cause": cause
+                })
+                if dying_role == "Hunter" and not players[idx]["poisoned_by_witch"]:
+                    renpy.call_screen("screen_hunter_shoot", idx)
+                players[idx]["top_alive"] = False
+
+            elif players[idx]["bottom_alive"]:
+                dying_role = players[idx]["bottom"]
+                cause = "poison" if players[idx]["poisoned_by_witch"] else "wolf"
+                current_phase_log["events"].append({
+                    "player": idx,
+                    "role": dying_role,
+                    "layer": "bottom",
+                    "cause": cause
+                })
+                if dying_role == "Hunter" and not players[idx]["poisoned_by_witch"]:
+                    renpy.call_screen("screen_hunter_shoot", idx)
+                players[idx]["bottom_alive"] = False
+
+    $ game_log.append(current_phase_log)
 
     jump day_phase
+# ── 禁言长老行动 ──────────────────────────────────────────────────────────────
+screen screen_elder_turn(elder_idx):
+    add Solid(BG_NIGHT)
+    default silence_target = -1
+
+    vbox:
+        xalign 0.5
+        yalign 0.38
+        spacing 30
+
+        text "🕯  禁言长老请睁眼":
+            xalign 0.5
+            size 56
+            color "#cccc66"
+            font FONT
+
+        $ elabel = "（第{}号玩家）".format(elder_idx + 1)
+        text elabel:
+            xalign 0.5
+            size 32
+            color COL_DIM
+            font FONT
+
+        null height 10
+        text "选择今夜要禁言的目标：":
+            xalign 0.5
+            size 32
+            color COL_SUB
+            font FONT
+
+        $ alive_idxs = [idx for idx in alive_players(players) if idx != elder_idx]
+        hbox:
+            xalign 0.5
+            spacing 40
+            vbox:
+                for i in range(0, len(alive_idxs), 2):
+                    $ idx = alive_idxs[i]
+                    button:
+                        xsize 500
+                        ysize 64
+                        background Frame(Solid("#333322"), 0, 0)
+                        hover_background Frame(Solid("#555533"), 0, 0)
+                        action SetScreenVariable("silence_target", idx)
+                        text "第{}号玩家".format(idx+1):
+                            xalign 0.5
+                            yalign 0.5
+                            size 32
+                            color "#ffffff"
+                            font FONT
+            vbox:
+                for i in range(1, len(alive_idxs), 2):
+                    $ idx = alive_idxs[i]
+                    button:
+                        xsize 500
+                        ysize 64
+                        background Frame(Solid("#333322"), 0, 0)
+                        hover_background Frame(Solid("#555533"), 0, 0)
+                        action SetScreenVariable("silence_target", idx)
+                        text "第{}号玩家".format(idx+1):
+                            xalign 0.5
+                            yalign 0.5
+                            size 32
+                            color "#ffffff"
+                            font FONT
+
+        null height 20
+
+        if silence_target >= 0:
+            button:
+                xsize 340
+                ysize 80
+                background Frame(Solid("#666633"), 0, 0)
+                hover_background Frame(Solid("#888844"), 0, 0)
+                action [Function(elder_silence_resolve, silence_target), Return()]
+                xalign 0.5
+                text "确认禁言，闭眼  ▶":
+                    xalign 0.5
+                    yalign 0.5
+                    size 34
+                    color "#ffffff"
+                    font FONT
+        else:
+            button:
+                xsize 340
+                ysize 80
+                background Frame(Solid("#222222"), 0, 0)
+                action NullAction()
+                xalign 0.5
+                text "请先选择目标":
+                    xalign 0.5
+                    yalign 0.5
+                    size 34
+                    color "#555555"
+                    font FONT
 
 
 # ═════════════════════════════════════════════════════════════════════════════
 #  白天阶段
 # ═════════════════════════════════════════════════════════════════════════════
 label day_phase:
+    $ current_phase_log = {"phase": "day", "day": night_count, "events": []}
 
     call screen screen_day_overview(night_count, night_deaths)
 
@@ -137,7 +341,16 @@ label day_phase:
     if _return == "explode":
         call screen screen_wolf_explode
         $ explode_idx = _return
-        $ players[explode_idx]["alive"] = False
+        if players[explode_idx]["top_alive"]:
+            $ dying_role = players[explode_idx]["top"]
+            if dying_role == "Hunter" and not players[explode_idx]["poisoned_by_witch"]:
+                call screen screen_hunter_shoot(explode_idx)
+            $ players[explode_idx]["top_alive"] = False
+        elif players[explode_idx]["bottom_alive"]:
+            $ dying_role = players[explode_idx]["bottom"]
+            if dying_role == "Hunter" and not players[explode_idx]["poisoned_by_witch"]:
+                call screen screen_hunter_shoot(explode_idx)
+            $ players[explode_idx]["bottom_alive"] = False
         call screen screen_explode_result(explode_idx)
         jump night_phase
 
@@ -145,11 +358,98 @@ label day_phase:
         call screen screen_vote
         $ vote_result = _return
         if vote_result >= 0:
-            $ players[vote_result]["alive"] = False
-            call screen screen_vote_result(vote_result)
+
+            # 判断当前被投掉的是哪一层
+            if players[vote_result]["top_alive"]:
+                $ dying_role = players[vote_result]["top"]
+                $ layer = "top"
+            elif players[vote_result]["bottom_alive"]:
+                $ dying_role = players[vote_result]["bottom"]
+                $ layer = "bottom"
+
+            # ── 白痴逻辑：第一次被投不死，只翻牌 ──
+            if dying_role == "Idiot" and not players[vote_result]["idiot_revealed"]:
+                $ players[vote_result]["idiot_revealed"] = True
+                call screen screen_idiot_reveal(vote_result, layer)
+                $ current_phase_log["events"].append({
+                    "player": vote_result,
+                    "role": dying_role,
+                    "layer": layer,
+                    "cause": "vote_saved"
+                })
+            else:
+                # 正常死亡流程
+                $ current_phase_log["events"].append({
+                    "player": vote_result,
+                    "role": dying_role,
+                    "layer": layer,
+                    "cause": "vote"
+                })
+                if dying_role == "Hunter" and not players[vote_result]["poisoned_by_witch"]:
+                    call screen screen_hunter_shoot(vote_result)
+
+                if layer == "top":
+                    $ players[vote_result]["top_alive"] = False
+                else:
+                    $ players[vote_result]["bottom_alive"] = False
+
+                call screen screen_vote_result(vote_result)
+            $ game_log.append(current_phase_log)
         else:
             call screen screen_vote_tie
         jump night_phase
+# ── 白痴翻牌 ──────────────────────────────────────────────────────────────
+screen screen_idiot_reveal(idx, layer):
+    add Solid(BG_DAY)
+    vbox:
+        xalign 0.5
+        yalign 0.42
+        spacing 36
+
+        text "白痴翻牌！":
+            xalign 0.5
+            size 56
+            color "#66ccff"
+            font FONT
+
+        text "第{}号玩家是白痴，本次不出局".format(idx+1):
+            xalign 0.5
+            size 36
+            color "#ffffff"
+            font FONT
+
+        if layer == "top":
+            $ role_txt = role_cn(players[idx]["top"])
+        else:
+            $ role_txt = role_cn(players[idx]["bottom"])
+
+        text "已翻开身份：{}".format(role_txt):
+            xalign 0.5
+            size 34
+            color "#aaccff"
+            font FONT
+
+        text "下一次被投票时将正常出局":
+            xalign 0.5
+            size 30
+            color COL_SUB
+            font FONT
+
+        null height 30
+
+        button:
+            xsize 340
+            ysize 80
+            background Frame(Solid(COL_BTN), 0, 0)
+            hover_background Frame(Solid(COL_BTN_H), 0, 0)
+            action Return()
+            xalign 0.5
+            text "继续游戏  ▶":
+                xalign 0.5
+                yalign 0.5
+                size 36
+                color "#ffffff"
+                font FONT
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -171,526 +471,8 @@ init python:
     FONT      = "SourceHanSansLite.ttf"
 
 
-# ── 夜晚过渡 ──────────────────────────────────────────────────────────────────
-screen screen_night_transition(n):
-    add Solid(BG_NIGHT)
-    vbox:
-        xalign 0.5
-        yalign 0.42
-        spacing 40
-        text "🌙  第 [n] 夜":
-            xalign 0.5
-            size 80
-            color COL_HEAD
-            font FONT
-        text "天黑请闭眼":
-            xalign 0.5
-            size 42
-            color COL_SUB
-            font FONT
-        null height 40
-        button:
-            xsize 340
-            ysize 85
-            background Frame(Solid(COL_BTN), 0, 0)
-            hover_background Frame(Solid(COL_BTN_H), 0, 0)
-            action Return()
-            xalign 0.5
-            text "进入夜晚  ▶":
-                xalign 0.5
-                yalign 0.5
-                size 38
-                color "#ffffff"
-                font FONT
 
 
-# ── 双民互认（仅第一夜 8人局） ───────────────────────────────────────────────
-screen screen_civil_recognize(indices):
-    add Solid(BG_NIGHT)
-    vbox:
-        xalign 0.5
-        yalign 0.40
-        spacing 36
-        text "双民请睁眼":
-            xalign 0.5
-            size 58
-            color COL_HEAD
-            font FONT
-        text "以下玩家互为双民，请相互确认：":
-            xalign 0.5
-            size 34
-            color COL_SUB
-            font FONT
-        null height 10
-        vbox:
-            xalign 0.5
-            spacing 16
-            for idx in indices:
-                $ label_str = "第{}号玩家　{}".format(idx+1, roles_display(players[idx]))
-                text label_str:
-                    xalign 0.5
-                    size 36
-                    color COL_GREEN
-                    font FONT
-        null height 30
-        text "双民请闭眼":
-            xalign 0.5
-            size 38
-            color COL_SUB
-            font FONT
-        null height 20
-        button:
-            xsize 340
-            ysize 85
-            background Frame(Solid(COL_BTN), 0, 0)
-            hover_background Frame(Solid(COL_BTN_H), 0, 0)
-            action Return()
-            xalign 0.5
-            text "确认，继续  ▶":
-                xalign 0.5
-                yalign 0.5
-                size 36
-                color "#ffffff"
-                font FONT
-
-
-# ── 狼人睁眼 & 选择击杀目标 ──────────────────────────────────────────────────
-screen screen_wolf_turn(wolf_indices):
-    add Solid(BG_NIGHT)
-    default selected = -1
-
-    vbox:
-        xalign 0.5
-        yalign 0.38
-        spacing 30
-
-        text "🐺  狼人请睁眼":
-            xalign 0.5
-            size 56
-            color COL_WOLF
-            font FONT
-
-        text "本局狼人阵营：":
-            xalign 0.5
-            size 32
-            color COL_SUB
-            font FONT
-        vbox:
-            xalign 0.5
-            spacing 10
-            for idx in wolf_indices:
-                $ wlabel = "第{}号玩家　{}".format(idx+1, roles_display(players[idx]))
-                text wlabel:
-                    xalign 0.5
-                    size 34
-                    color COL_WOLF
-                    font FONT
-
-        null height 20
-        text "选择今夜击杀目标：":
-            xalign 0.5
-            size 32
-            color COL_SUB
-            font FONT
-
-        vbox:
-            xalign 0.5
-            spacing 12
-            for idx in alive_players(players):
-                if not is_wolf(players[idx]):
-                    $ is_sel = (idx == selected)
-                    $ bg_col = "#553333" if is_sel else "#1e1e2e"
-                    $ bg_hov = "#774444" if is_sel else "#2a2a44"
-                    button:
-                        xsize 500
-                        ysize 64
-                        background Frame(Solid(bg_col), 0, 0)
-                        hover_background Frame(Solid(bg_hov), 0, 0)
-                        action SetScreenVariable("selected", idx)
-                        xalign 0.5
-                        text "第{}号玩家".format(idx+1):
-                            xalign 0.5
-                            yalign 0.5
-                            size 32
-                            color "#ffffff"
-                            font FONT
-
-        null height 20
-
-        if selected >= 0:
-            button:
-                xsize 340
-                ysize 80
-                background Frame(Solid("#882222"), 0, 0)
-                hover_background Frame(Solid("#aa3333"), 0, 0)
-                action [SetVariable("wolf_kill_target", selected), Return()]
-                xalign 0.5
-                text "确认击杀，闭眼  ▶":
-                    xalign 0.5
-                    yalign 0.5
-                    size 34
-                    color "#ffffff"
-                    font FONT
-        else:
-            button:
-                xsize 340
-                ysize 80
-                background Frame(Solid("#442222"), 0, 0)
-                action NullAction()
-                xalign 0.5
-                text "请先选择目标":
-                    xalign 0.5
-                    yalign 0.5
-                    size 34
-                    color "#888888"
-                    font FONT
-
-
-# ── 预言家查验 ────────────────────────────────────────────────────────────────
-screen screen_prophet_turn(prophet_idx):
-    add Solid(BG_NIGHT)
-    default checked = -1
-
-    vbox:
-        xalign 0.5
-        yalign 0.38
-        spacing 30
-
-        text "🔮  预言家请睁眼":
-            xalign 0.5
-            size 56
-            color "#50aaff"
-            font FONT
-
-        $ plabel = "（第{}号玩家）".format(prophet_idx + 1)
-        text plabel:
-            xalign 0.5
-            size 32
-            color COL_DIM
-            font FONT
-
-        null height 10
-        text "请选择今夜查验的目标：":
-            xalign 0.5
-            size 32
-            color COL_SUB
-            font FONT
-
-        vbox:
-            xalign 0.5
-            spacing 12
-            for idx in alive_players(players):
-                if idx != prophet_idx:
-                    $ is_sel = (idx == checked)
-                    $ bg_c = "#1a2a44" if is_sel else "#1e1e2e"
-                    $ bg_h = "#2a3a66" if is_sel else "#2a2a44"
-                    button:
-                        xsize 500
-                        ysize 64
-                        background Frame(Solid(bg_c), 0, 0)
-                        hover_background Frame(Solid(bg_h), 0, 0)
-                        action SetScreenVariable("checked", idx)
-                        xalign 0.5
-                        text "第{}号玩家".format(idx+1):
-                            xalign 0.5
-                            yalign 0.5
-                            size 32
-                            color "#ffffff"
-                            font FONT
-
-        if checked >= 0:
-            null height 10
-            $ target_p = players[checked]
-            $ check_wolf = is_wolf(target_p)
-            $ result_col = COL_WOLF if check_wolf else COL_GREEN
-            $ result_txt = "狼人阵营 !" if check_wolf else "好人阵营"
-            frame:
-                xalign 0.5
-                xsize 520
-                ysize 100
-                background Frame(Solid("#111122"), 0, 0)
-                padding (20, 10, 20, 10)
-                vbox:
-                    xalign 0.5
-                    yalign 0.5
-                    spacing 6
-                    text "第{}号玩家  查验结果：".format(checked+1):
-                        xalign 0.5
-                        size 28
-                        color COL_SUB
-                        font FONT
-                    text result_txt:
-                        xalign 0.5
-                        size 44
-                        color result_col
-                        font FONT
-
-            null height 16
-            button:
-                xsize 340
-                ysize 80
-                background Frame(Solid(COL_BTN), 0, 0)
-                hover_background Frame(Solid(COL_BTN_H), 0, 0)
-                action Return()
-                xalign 0.5
-                text "已知晓，闭眼  ▶":
-                    xalign 0.5
-                    yalign 0.5
-                    size 34
-                    color "#ffffff"
-                    font FONT
-
-
-# ── 守卫守护 ──────────────────────────────────────────────────────────────────
-screen screen_guard_turn(guard_idx):
-    add Solid(BG_NIGHT)
-    default guarding = -1
-
-    vbox:
-        xalign 0.5
-        yalign 0.38
-        spacing 30
-
-        text "🛡  守卫请睁眼":
-            xalign 0.5
-            size 56
-            color "#66cc66"
-            font FONT
-
-        $ glabel = "（第{}号玩家）".format(guard_idx + 1)
-        text glabel:
-            xalign 0.5
-            size 32
-            color COL_DIM
-            font FONT
-
-        if guard_last_target >= 0:
-            $ last_txt = "上一夜守护了第{}号玩家，今夜不可连守".format(guard_last_target + 1)
-            text last_txt:
-                xalign 0.5
-                size 28
-                color "#cc9933"
-                font FONT
-
-        null height 10
-        text "选择今夜守护的目标：":
-            xalign 0.5
-            size 32
-            color COL_SUB
-            font FONT
-
-        vbox:
-            xalign 0.5
-            spacing 12
-            for idx in alive_players(players):
-                $ can_guard = (idx != guard_last_target)
-                $ bg_c = "#1a3322" if (idx == guarding) else ("#1e1e2e" if can_guard else "#1a1a1a")
-                $ bg_h = "#2a5533" if (idx == guarding) else ("#2a2a44" if can_guard else "#1a1a1a")
-                $ txt_col = "#ffffff" if can_guard else "#555555"
-                button:
-                    xsize 500
-                    ysize 64
-                    background Frame(Solid(bg_c), 0, 0)
-                    hover_background Frame(Solid(bg_h), 0, 0)
-                    action (SetScreenVariable("guarding", idx) if can_guard else NullAction())
-                    xalign 0.5
-                    text "第{}号玩家".format(idx+1):
-                        xalign 0.5
-                        yalign 0.5
-                        size 32
-                        color txt_col
-                        font FONT
-
-        null height 20
-
-        if guarding >= 0:
-            button:
-                xsize 340
-                ysize 80
-                background Frame(Solid("#226633"), 0, 0)
-                hover_background Frame(Solid("#338844"), 0, 0)
-                action [SetVariable("guard_protected_this_night", guarding),
-                        SetVariable("guard_last_target", guarding),
-                        Return()]
-                xalign 0.5
-                text "确认守护，闭眼  ▶":
-                    xalign 0.5
-                    yalign 0.5
-                    size 34
-                    color "#ffffff"
-                    font FONT
-        else:
-            button:
-                xsize 340
-                ysize 80
-                background Frame(Solid("#222233"), 0, 0)
-                action NullAction()
-                xalign 0.5
-                text "请先选择目标":
-                    xalign 0.5
-                    yalign 0.5
-                    size 34
-                    color "#555555"
-                    font FONT
-
-
-# ── 女巫行动 ──────────────────────────────────────────────────────────────────
-screen screen_witch_turn(witch_idx):
-    add Solid(BG_NIGHT)
-    default witch_action = "none"
-    default poison_target = -1
-
-    vbox:
-        xalign 0.5
-        yalign 0.35
-        spacing 26
-
-        text "🧪  女巫请睁眼":
-            xalign 0.5
-            size 56
-            color "#cc66ff"
-            font FONT
-
-        $ wlabel = "（第{}号玩家）".format(witch_idx + 1)
-        text wlabel:
-            xalign 0.5
-            size 32
-            color COL_DIM
-            font FONT
-
-        null height 6
-
-        if wolf_kill_target >= 0:
-            $ killed_label = "今夜被狼人击杀：第{}号玩家".format(wolf_kill_target + 1)
-            text killed_label:
-                xalign 0.5
-                size 34
-                color COL_WOLF
-                font FONT
-        else:
-            text "今夜狼人未击杀任何人":
-                xalign 0.5
-                size 34
-                color COL_SUB
-                font FONT
-
-        null height 10
-
-        hbox:
-            xalign 0.5
-            spacing 30
-
-            if not witch_save_used and wolf_kill_target >= 0:
-                button:
-                    xsize 300
-                    ysize 80
-                    background Frame(Solid("#226633" if witch_action == "save" else "#1e2e1e"), 0, 0)
-                    hover_background Frame(Solid("#338844"), 0, 0)
-                    action SetScreenVariable("witch_action", "save")
-                    text "使用解药  💊":
-                        xalign 0.5
-                        yalign 0.5
-                        size 32
-                        color "#aaffcc"
-                        font FONT
-            else:
-                frame:
-                    xsize 300
-                    ysize 80
-                    background Frame(Solid("#1a1a1a"), 0, 0)
-                    text "解药已用 / 无目标":
-                        xalign 0.5
-                        yalign 0.5
-                        size 28
-                        color "#555555"
-                        font FONT
-
-            if not witch_poison_used:
-                button:
-                    xsize 300
-                    ysize 80
-                    background Frame(Solid("#552266" if witch_action == "poison" else "#1e1e2e"), 0, 0)
-                    hover_background Frame(Solid("#773388"), 0, 0)
-                    action SetScreenVariable("witch_action", "poison")
-                    text "使用毒药  ☠":
-                        xalign 0.5
-                        yalign 0.5
-                        size 32
-                        color "#dd88ff"
-                        font FONT
-            else:
-                frame:
-                    xsize 300
-                    ysize 80
-                    background Frame(Solid("#1a1a1a"), 0, 0)
-                    text "毒药已用":
-                        xalign 0.5
-                        yalign 0.5
-                        size 28
-                        color "#555555"
-                        font FONT
-
-        if witch_action == "poison":
-            null height 10
-            text "选择毒杀目标：":
-                xalign 0.5
-                size 30
-                color COL_SUB
-                font FONT
-            vbox:
-                xalign 0.5
-                spacing 10
-                for idx in alive_players(players):
-                    if idx != witch_idx:
-                        $ bg_p = "#441133" if (idx == poison_target) else "#1e1e2e"
-                        $ bg_ph = "#662244" if (idx == poison_target) else "#2a2a44"
-                        button:
-                            xsize 460
-                            ysize 58
-                            background Frame(Solid(bg_p), 0, 0)
-                            hover_background Frame(Solid(bg_ph), 0, 0)
-                            action SetScreenVariable("poison_target", idx)
-                            xalign 0.5
-                            text "第{}号玩家".format(idx+1):
-                                xalign 0.5
-                                yalign 0.5
-                                size 30
-                                color "#ffffff"
-                                font FONT
-
-        null height 16
-
-        button:
-            xsize 300
-            ysize 64
-            background Frame(Solid("#222233" if witch_action == "none" else "#1a1a2a"), 0, 0)
-            hover_background Frame(Solid("#333355"), 0, 0)
-            action SetScreenVariable("witch_action", "none")
-            xalign 0.5
-            text "本夜不行动":
-                xalign 0.5
-                yalign 0.5
-                size 30
-                color "#aaaaaa"
-                font FONT
-
-        null height 20
-
-        $ can_confirm = (witch_action != "poison") or (poison_target >= 0)
-        if can_confirm:
-            button:
-                xsize 360
-                ysize 80
-                background Frame(Solid(COL_BTN), 0, 0)
-                hover_background Frame(Solid(COL_BTN_H), 0, 0)
-                xalign 0.5
-                action [Function(witch_resolve, witch_action, wolf_kill_target, poison_target), Return()]
-                text "确认行动，闭眼  ▶":
-                    xalign 0.5
-                    yalign 0.5
-                    size 34
-                    color "#ffffff"
-                    font FONT
 
 
 init python:
@@ -698,80 +480,28 @@ init python:
         global witch_save_used, witch_poison_used, night_deaths, players
         if action == "save":
             witch_save_used = True
-            # kill_target 被救，不加入 night_deaths
+            renpy.store._last_witch_target = kill_target
+            # 核心修复：从死亡列表中移除狼人目标
+            if kill_target in night_deaths:
+                night_deaths.remove(kill_target)
+
         elif action == "poison":
             witch_poison_used = True
+            renpy.store._last_witch_target = p_target
             players[p_target]["poisoned_by_witch"] = True
             if p_target not in night_deaths:
                 night_deaths.append(p_target)
+
         # 若不行动或毒人，狼人击杀目标照常加入 night_deaths
         if action != "save" and kill_target >= 0:
             if kill_target not in night_deaths:
                 night_deaths.append(kill_target)
 
+    def elder_silence_resolve(target):
+        global silenced_players
+        if target not in silenced_players:
+            silenced_players.append(target)
 
-# ── 猎人开枪状态 ─────────────────────────────────────────────────────────────
-screen screen_hunter_status(hunter_idx, can_shoot):
-    add Solid(BG_NIGHT)
-
-    vbox:
-        xalign 0.5
-        yalign 0.42
-        spacing 36
-
-        text "🏹  猎人请睁眼":
-            xalign 0.5
-            size 56
-            color "#ff9933"
-            font FONT
-
-        $ hlabel = "（第{}号玩家）".format(hunter_idx + 1)
-        text hlabel:
-            xalign 0.5
-            size 32
-            color COL_DIM
-            font FONT
-
-        null height 20
-
-        if can_shoot:
-            text "今夜开枪状态：✔ 可以开枪":
-                xalign 0.5
-                size 42
-                color COL_GREEN
-                font FONT
-            text "若今夜死亡，可带走一名玩家":
-                xalign 0.5
-                size 30
-                color COL_SUB
-                font FONT
-        else:
-            text "今夜开枪状态：✘ 不可开枪":
-                xalign 0.5
-                size 42
-                color COL_WOLF
-                font FONT
-            text "你已被女巫毒杀，无法开枪":
-                xalign 0.5
-                size 30
-                color "#cc6655"
-                font FONT
-
-        null height 30
-
-        button:
-            xsize 340
-            ysize 80
-            background Frame(Solid(COL_BTN), 0, 0)
-            hover_background Frame(Solid(COL_BTN_H), 0, 0)
-            action Return()
-            xalign 0.5
-            text "已知晓，闭眼  ▶":
-                xalign 0.5
-                yalign 0.5
-                size 34
-                color "#ffffff"
-                font FONT
 
 
 # ── 白天：法官总览 ────────────────────────────────────────────────────────────
@@ -782,6 +512,22 @@ screen screen_day_overview(night_n, deaths):
         xalign 0.5
         yalign 0.04
         spacing 24
+
+        hbox:
+            xalign 0.0
+            yalign 0.0
+            button:
+                xsize 160
+                ysize 60
+                background Frame(Solid("#333333"), 0, 0)
+                hover_background Frame(Solid("#555555"), 0, 0)
+                action Show("screen_game_log")
+                text "记录":
+                    xalign 0.5
+                    yalign 0.5
+                    size 24
+                    color "#ffffff"
+                    font FONT
 
         text "☀  第 [night_n] 夜结束  —  法官总览":
             xalign 0.5
@@ -830,9 +576,10 @@ screen screen_day_overview(night_n, deaths):
                 spacing 12
                 for i in range(0, len(players), 2):
                     $ p = players[i]
-                    $ bg = COL_DEAD if not p["alive"] else COL_ALIVE
-                    $ status = "† 死亡" if not p["alive"] else "存活"
-                    $ status_col = "#cc7777" if not p["alive"] else COL_GREEN
+                    $ bg = COL_DEAD if not (p["top_alive"] or p["bottom_alive"]) else COL_ALIVE
+                    $ lives = int(p["top_alive"]) + int(p["bottom_alive"])
+                    $ status = "† 死亡" if lives == 0 else ("剩余{}条命".format(lives))
+                    $ status_col = "#cc7777" if lives == 0 else COL_GREEN
                     frame:
                         xsize 700
                         ysize 76
@@ -862,9 +609,10 @@ screen screen_day_overview(night_n, deaths):
                 spacing 12
                 for i in range(1, len(players), 2):
                     $ p = players[i]
-                    $ bg = COL_DEAD if not p["alive"] else COL_ALIVE
-                    $ status = "† 死亡" if not p["alive"] else "存活"
-                    $ status_col = "#cc7777" if not p["alive"] else COL_GREEN
+                    $ bg = COL_DEAD if not (p["top_alive"] or p["bottom_alive"]) else COL_ALIVE
+                    $ lives = int(p["top_alive"]) + int(p["bottom_alive"])
+                    $ status = "† 死亡" if lives == 0 else ("剩余{}条命".format(lives))
+                    $ status_col = "#cc7777" if lives == 0 else COL_GREEN
                     frame:
                         xsize 700
                         ysize 76
@@ -898,12 +646,13 @@ screen screen_day_overview(night_n, deaths):
             hover_background Frame(Solid("#886600"), 0, 0)
             action Return()
             xalign 0.5
-            text "进入白天讨论  ▶":
+            text "结束白天讨论  ▶":
                 xalign 0.5
                 yalign 0.5
                 size 36
                 color "#ffffff"
                 font FONT
+
 
 
 # ── 白天：选择结束方式 ────────────────────────────────────────────────────────
@@ -996,11 +745,32 @@ screen screen_wolf_explode():
             color COL_SUB
             font FONT
 
-        vbox:
+        $ alive_idxs = [idx for idx in alive_players(players) if is_wolf(players[idx])]
+        hbox:
             xalign 0.5
-            spacing 12
-            for idx in alive_players(players):
-                if is_wolf(players[idx]):
+            spacing 40
+            vbox:
+                for i in range(0, len(alive_idxs), 2):
+                    $ idx = alive_idxs[i]
+                    $ bg_e = "#553333" if (idx == explode_sel) else "#1e1e2e"
+                    $ bg_eh = "#774444" if (idx == explode_sel) else "#2a2a44"
+                    button:
+                        xsize 520
+                        ysize 68
+                        background Frame(Solid(bg_e), 0, 0)
+                        hover_background Frame(Solid(bg_eh), 0, 0)
+                        action SetScreenVariable("explode_sel", idx)
+                        xalign 0.5
+                        $ elabel = "第{}号玩家　{}".format(idx+1, roles_display(players[idx]))
+                        text elabel:
+                            xalign 0.5
+                            yalign 0.5
+                            size 32
+                            color "#ffffff"
+                            font FONT
+            vbox:
+                for i in range(1, len(alive_idxs), 2):
+                    $ idx = alive_idxs[i]
                     $ bg_e = "#553333" if (idx == explode_sel) else "#1e1e2e"
                     $ bg_eh = "#774444" if (idx == explode_sel) else "#2a2a44"
                     button:
@@ -1109,25 +879,46 @@ screen screen_vote():
             color COL_SUB
             font FONT
 
-        vbox:
+        $ alive_idxs = alive_players(players)
+        hbox:
             xalign 0.5
-            spacing 12
-            for idx in alive_players(players):
-                $ bg_v = "#1a2244" if (idx == vote_sel) else "#1e1e2e"
-                $ bg_vh = "#2a3466" if (idx == vote_sel) else "#2a2a44"
-                button:
-                    xsize 500
-                    ysize 64
-                    background Frame(Solid(bg_v), 0, 0)
-                    hover_background Frame(Solid(bg_vh), 0, 0)
-                    action SetScreenVariable("vote_sel", idx)
-                    xalign 0.5
-                    text "第{}号玩家".format(idx+1):
+            spacing 40
+            vbox:
+                for i in range(0, len(alive_idxs), 2):
+                    $ idx = alive_idxs[i]
+                    $ bg_v = "#1a2244" if (idx == vote_sel) else "#1e1e2e"
+                    $ bg_vh = "#2a3466" if (idx == vote_sel) else "#2a2a44"
+                    button:
+                        xsize 500
+                        ysize 64
+                        background Frame(Solid(bg_v), 0, 0)
+                        hover_background Frame(Solid(bg_vh), 0, 0)
+                        action SetScreenVariable("vote_sel", idx)
                         xalign 0.5
-                        yalign 0.5
-                        size 32
-                        color "#ffffff"
-                        font FONT
+                        text "第{}号玩家".format(idx+1):
+                            xalign 0.5
+                            yalign 0.5
+                            size 32
+                            color "#ffffff"
+                            font FONT
+            vbox:
+                for i in range(1, len(alive_idxs), 2):
+                    $ idx = alive_idxs[i]
+                    $ bg_v = "#1a2244" if (idx == vote_sel) else "#1e1e2e"
+                    $ bg_vh = "#2a3466" if (idx == vote_sel) else "#2a2a44"
+                    button:
+                        xsize 500
+                        ysize 64
+                        background Frame(Solid(bg_v), 0, 0)
+                        hover_background Frame(Solid(bg_vh), 0, 0)
+                        action SetScreenVariable("vote_sel", idx)
+                        xalign 0.5
+                        text "第{}号玩家".format(idx+1):
+                            xalign 0.5
+                            yalign 0.5
+                            size 32
+                            color "#ffffff"
+                            font FONT
 
         null height 20
 
@@ -1173,6 +964,120 @@ screen screen_vote():
                         size 34
                         color "#555555"
                         font FONT
+
+# ── 猎人遗言/开枪 ──────────────────────────────────────────────────────────────
+screen screen_hunter_shoot(hunter_idx):
+    add Solid(BG_DAY)
+    default shoot_target = -1
+
+    vbox:
+        xalign 0.5
+        yalign 0.4
+        spacing 30
+
+        text "猎人遗言阶段":
+            xalign 0.5
+            size 50
+            color "#ffaa44"
+            font FONT
+
+        text "是否开枪并带走一条命？":
+            xalign 0.5
+            size 30
+            color COL_SUB
+            font FONT
+
+        $ alive_idxs = [idx for idx in alive_players(players) if idx != hunter_idx]
+        hbox:
+            xalign 0.5
+            spacing 40
+            vbox:
+                for i in range(0, len(alive_idxs), 2):
+                    $ idx = alive_idxs[i]
+                    button:
+                        xsize 460
+                        ysize 60
+                        background Frame(Solid("#333333"), 0, 0)
+                        hover_background Frame(Solid("#555555"), 0, 0)
+                        action SetScreenVariable("shoot_target", idx)
+                        text "第{}号玩家".format(idx+1):
+                            xalign 0.5
+                            yalign 0.5
+                            size 28
+                            color "#ffffff"
+                            font FONT
+            vbox:
+                for i in range(1, len(alive_idxs), 2):
+                    $ idx = alive_idxs[i]
+                    button:
+                        xsize 460
+                        ysize 60
+                        background Frame(Solid("#333333"), 0, 0)
+                        hover_background Frame(Solid("#555555"), 0, 0)
+                        action SetScreenVariable("shoot_target", idx)
+                        text "第{}号玩家".format(idx+1):
+                            xalign 0.5
+                            yalign 0.5
+                            size 28
+                            color "#ffffff"
+                            font FONT
+
+        if shoot_target >= 0:
+            button:
+                xsize 300
+                ysize 70
+                background Frame(Solid("#aa4444"), 0, 0)
+                action [Function(hunter_shoot_resolve, shoot_target), Return()]
+                xalign 0.5
+                text "开枪":
+                    xalign 0.5
+                    yalign 0.5
+                    size 32
+                    color "#ffffff"
+                    font FONT
+
+        button:
+            xsize 300
+            ysize 70
+            background Frame(Solid("#444444"), 0, 0)
+            action Return()
+            xalign 0.5
+            text "不开枪":
+                xalign 0.5
+                yalign 0.5
+                size 30
+                color "#cccccc"
+                font FONT
+
+init python:
+    def hunter_shoot_resolve(target):
+        global players
+
+        # 判断击杀的是哪一层
+        if players[target]["top_alive"]:
+            layer = "top"
+            role = players[target]["top"]
+            players[target]["top_alive"] = False
+        elif players[target]["bottom_alive"]:
+            layer = "bottom"
+            role = players[target]["bottom"]
+            players[target]["bottom_alive"] = False
+        else:
+            return
+
+        # 写入日志
+        if current_phase_log is not None:
+            current_phase_log["events"].append({
+                "player": target,
+                "role": role,
+                "layer": layer,
+                "cause": "hunter_shoot"
+            })
+
+    def wolf_kill_resolve(target):
+        global night_deaths
+        if target not in night_deaths:
+            night_deaths.append(target)
 
 
 # ── 投票结果 ──────────────────────────────────────────────────────────────────
@@ -1239,3 +1144,5 @@ screen screen_vote_tie():
                 size 36
                 color "#ffffff"
                 font FONT
+
+    # TODO: 在白天阶段根据 silenced_players 禁止发言或操作
