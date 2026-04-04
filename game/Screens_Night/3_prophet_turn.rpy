@@ -88,7 +88,7 @@ screen screen_prophet_turn(prophet_idx):
         if checked >= 0:
             null height 10
             $ target_p = players[checked]
-            $ check_wolf = is_wolf(target_p)
+            $ check_wolf = is_wolf_prophet(target_p)
             $ result_col = COL_WOLF if check_wolf else COL_GREEN
             $ result_txt = "狼人阵营 !" if check_wolf else "好人阵营"
             frame:
