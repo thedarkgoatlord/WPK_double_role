@@ -126,13 +126,21 @@ label night_phase:
     $ guard_protected_this_night = -1
     $ silenced_player = -1
 
+    # 初始化新夜晚事件系统
+    $ reset_night_events()
+
+    # 记录前一晚的生存状态（用于死亡公告刷新）
+    python:
+        for p in players:
+            p["_prev_top_alive"] = p["top_alive"]
+            p["_prev_bottom_alive"] = p["bottom_alive"]
+
     call screen screen_night_transition(night_count)
 
     # 第一夜 8人局：双民互认
     if night_count == 1 and player_count == 8:
         $ double_civil_indices = [i for i in range(len(players)) if is_double_civil(players[i])]
-        if len(double_civil_indices) >= 2:
-            call screen screen_civil_recognize(double_civil_indices)
+        call screen screen_civil_recognize(double_civil_indices)
 
     # 狼人睁眼
     $ wolf_indices = [i for i in alive_players(players) if is_wolf_night(players[i])]
@@ -182,7 +190,7 @@ label night_phase:
     if witch_indices:
         $ w_idx = witch_indices[0]
         call screen screen_witch_turn(w_idx)
-
+        
         if witch_save_used or witch_poison_used:
             $ current_phase_log["actions"].append({
                 "type": "witch",
@@ -208,63 +216,34 @@ label night_phase:
         call screen screen_elder_turn(None)
 
     # 猎人开枪状态告知
-    $ hunter_indices = alive_with_role(players, "Hunter")
+
+
+    # ── 使用新结算系统 ──
+    python:
+        resolve_night(players, renpy.store.night_events)
+
+        # 根据剩余生命同步 night_deaths（用于UI展示）
+        night_deaths = []
+        for i, p in enumerate(players):
+            lives = int(p["top_alive"]) + int(p["bottom_alive"])
+            if lives == 0:
+                night_deaths.append(i)
+
+    # 猎人开枪状态（基于“本夜是否死亡”而非是否死透）
+    $ hunter_indices = [i for i, p in enumerate(players) if has_role(p, "Hunter")]
     if hunter_indices:
         $ hunter_idx = hunter_indices[0]
+        $ p = players[hunter_idx]
 
-        # 当前存活命数
-        $ lives = int(players[hunter_idx]["top_alive"]) + int(players[hunter_idx]["bottom_alive"])
+        # 判断本夜是否发生死亡（层死亡）
+        $ lost_top = (not p["top_alive"] and p.get("_prev_top_alive", True))
+        $ lost_bottom = (not p["bottom_alive"] and p.get("_prev_bottom_alive", True))
+        $ died_this_night = lost_top or lost_bottom
 
-        # 判断这一夜是否会死亡（被刀或被毒）
-        $ will_die_tonight = (hunter_idx in night_deaths)
-
-        # 判断死亡的是否是猎人这一层（只要还有命且本夜被击杀，就视为触发）
-        $ hunter_can_shoot = (will_die_tonight and not players[hunter_idx]["poisoned_by_witch"])
+        # 被毒死不能开枪
+        $ hunter_can_shoot = (died_this_night and not p["poisoned_by_witch"])
 
         call screen screen_hunter_status(hunter_idx, hunter_can_shoot)
-
-    # 结算当夜死亡（守卫守护的目标不死，奶穿机制）
-    python:
-        for idx in list(night_deaths):
-            # 奶穿机制：如果同时被守卫守护且被女巫解药救，则仍然死亡
-            saved_by_witch = (idx == _last_witch_target and witch_save_used)
-            guarded = (idx == guard_protected_this_night)
-
-            if guarded and not players[idx]["poisoned_by_witch"]:
-                if saved_by_witch:
-                    # 奶穿：守卫 + 解药 → 仍然死亡（不移除）
-                    pass
-                else:
-                    # 只有守卫生效 → 挡刀
-                    night_deaths.remove(idx)
-
-        for idx in night_deaths:
-            # 判断本次死亡的是哪一层身份
-            if players[idx]["top_alive"]:
-                dying_role = players[idx]["top"]
-                cause = "poison" if players[idx]["poisoned_by_witch"] else "wolf"
-                current_phase_log["events"].append({
-                    "player": idx,
-                    "role": dying_role,
-                    "layer": "top",
-                    "cause": cause
-                })
-                if dying_role == "Hunter" and not players[idx]["poisoned_by_witch"]:
-                    renpy.call_screen("screen_hunter_shoot", idx)
-                players[idx]["top_alive"] = False
-
-            elif players[idx]["bottom_alive"]:
-                dying_role = players[idx]["bottom"]
-                cause = "poison" if players[idx]["poisoned_by_witch"] else "wolf"
-                current_phase_log["events"].append({
-                    "player": idx,
-                    "role": dying_role,
-                    "layer": "bottom",
-                    "cause": cause
-                })
-                if dying_role == "Hunter" and not players[idx]["poisoned_by_witch"]:
-                    renpy.call_screen("screen_hunter_shoot", idx)
-                players[idx]["bottom_alive"] = False
 
     $ game_log.append(current_phase_log)
 
@@ -280,6 +259,20 @@ label night_phase:
 # ═════════════════════════════════════════════════════════════════════════════
 label day_phase:
     $ current_phase_log = {"phase": "day", "day": night_count, "events": []}
+
+    # 夜晚死亡的猎人在白天触发技能
+    $ hunter_indices = [i for i, p in enumerate(players) if has_role(p, "Hunter")]
+    if hunter_indices:
+        $ hunter_idx = hunter_indices[0]
+        $ p = players[hunter_idx]
+
+        $ lost_top = (not p["top_alive"] and p.get("_prev_top_alive", True))
+        $ lost_bottom = (not p["bottom_alive"] and p.get("_prev_bottom_alive", True))
+        $ died_this_night = lost_top or lost_bottom
+
+        if died_this_night and not p["poisoned_by_witch"]:
+            call screen screen_hunter_shoot(hunter_idx)
+        
 
     call screen screen_day_overview(night_count, night_deaths, silenced_player)
 
@@ -408,20 +401,36 @@ screen screen_day_overview(night_n, deaths, silenced):
             color "#ffcc66"
             font FONT
 
-        # 昨夜死亡公告
-        if deaths:
-            hbox:
+        # 昨夜死亡公告（基于层级死亡）
+        python:
+            night_events_summary = []
+            for i, p in enumerate(players):
+                # 判断是否有层死亡（而不是是否死透）
+                lost_top = not p["top_alive"] and p.get("_prev_top_alive", True)
+                lost_bottom = not p["bottom_alive"] and p.get("_prev_bottom_alive", True)
+
+                if lost_top or lost_bottom:
+                    layers = []
+                    if lost_top:
+                        layers.append("上")
+                    if lost_bottom:
+                        layers.append("下")
+                    night_events_summary.append((i, layers))
+
+        if night_events_summary:
+            vbox:
                 xalign 0.5
-                spacing 16
+                spacing 10
                 text "昨夜死亡：":
-                    yalign 0.5
+                    xalign 0.5
                     size 34
                     color COL_WOLF
                     font FONT
-                for idx in deaths:
-                    text "第{}号".format(idx+1):
-                        yalign 0.5
-                        size 34
+
+                for idx, layers in night_events_summary:
+                    text "第{}号（{}层）".format(idx+1, "、".join(layers)):
+                        xalign 0.5
+                        size 30
                         color "#ff8888"
                         font FONT
         else:

@@ -41,6 +41,7 @@ label ending_check:
         call screen screen_wolf_wins
     elif _ending == "good":
         call screen screen_good_wins
+    call screen screen_game_log_overview
     jump begin_game   # 游戏结束后重置回起点（或改为 return / 主菜单）
 
 
@@ -270,5 +271,199 @@ screen screen_good_wins():
                 xalign 0.5
                 yalign 0.5
                 size 38
+                color "#ffffff"
+                font FONT
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+#  游戏日志总览（双列显示）
+# ═════════════════════════════════════════════════════════════════════════════
+
+screen screen_game_log_overview():
+
+    add Solid("#0a0a0a")
+
+    vbox:
+        xalign 0.5
+        yalign 0.08
+        spacing 20
+
+        text "📜 对局记录":
+            xalign 0.5
+            size 60
+            color "#ffffff"
+            font FONT
+
+    # 双列主体
+    hbox:
+        xalign 0.5
+        yalign 0.55
+        spacing 40
+
+        $ half = len(game_log) // 2 + len(game_log) % 2
+
+        # 左列
+        viewport:
+            draggable True
+            mousewheel True
+            xsize 600
+            ysize 700
+
+            vbox:
+                spacing 16
+                for entry in game_log[:half]:
+                    $ phase_txt = "第{}夜".format(entry["day"]) if entry["phase"] == "night" else "第{}天".format(entry["day"])
+
+                    frame:
+                        background Frame(Solid("#111122"), 0, 0)
+                        padding (10,10,10,10)
+
+                        vbox:
+                            spacing 6
+
+                            text phase_txt:
+                                size 30
+                                color "#ccccff"
+                                font FONT
+
+                            if entry["events"]:
+                                for e in entry["events"]:
+                                    $ cause_map = {
+                                        "wolf": "被狼人击杀",
+                                        "poison": "被女巫毒死",
+                                        "vote": "被投票出局",
+                                        "vote_saved": "被投票但白痴免死",
+                                        "hunter_shoot": "被猎人击杀"
+                                    }
+                                    $ txt = "{}号 （{}） {}".format(e["player"]+1, str(role_cn(e["role"])), cause_map.get(e["cause"], e["cause"]))
+                                    text txt:
+                                        size 26
+                                        color "#ffffff"
+                                        font FONT
+                            else:
+                                text "无事件":
+                                    size 24
+                                    color "#888888"
+                                    font FONT
+
+                            if entry.get("actions"):
+                                for act in entry["actions"]:
+                                    if act["type"] == "wolf_kill":
+                                        $ part_txt = "，".join(["{}号".format(i+1) for i in act.get("participants", [])])
+                                        $ txt = "狼人（{}）选择击杀：{}号玩家".format(part_txt if part_txt else "未知", act["target"]+1)
+                                    elif act["type"] == "prophet_check":
+                                        $ res_txt = "狼人" if act["result"] else "好人"
+                                        $ txt = "预言家查验：{}号玩家 → {}".format(act["target"]+1, res_txt)
+                                    elif act["type"] == "guard":
+                                        if act["target"] >= 0:
+                                            $ txt = "守卫守护：{}号玩家".format(act["target"]+1)
+                                        else:
+                                            $ txt = "守卫未守护"
+                                    elif act["type"] == "witch":
+                                        if act.get("target") is not None:
+                                            $ tgt_txt = "{}号玩家".format(act["target"]+1)
+                                        else:
+                                            $ tgt_txt = "无目标"
+                                        $ txt = "女巫行动（解药：{}，毒药：{}，目标：{}）".format("已用" if act["save_used"] else "未用", "已用" if act["poison_used"] else "未用", tgt_txt)
+                                    elif act["type"] == "elder":
+                                        $ txt = "长老禁言 {} 号".format(str(act["targets"]))
+                                    elif act["type"] == "hunter_shoot":
+                                        $ txt = "猎人带走 {} 号".format(str(act["target"]))
+                                    else:
+                                        $ txt = "未知行动"
+                                    text txt:
+                                        size 24
+                                        color "#cccccc"
+                                        font FONT
+
+        # 右列
+        viewport:
+            draggable True
+            mousewheel True
+            xsize 600
+            ysize 700
+
+            vbox:
+                spacing 16
+                for entry in game_log[half:]:
+                    $ phase_txt = "第{}夜".format(entry["day"]) if entry["phase"] == "night" else "第{}天".format(entry["day"])
+
+                    frame:
+                        background Frame(Solid("#111122"), 0, 0)
+                        padding (10,10,10,10)
+
+                        vbox:
+                            spacing 6
+
+                            text phase_txt:
+                                size 30
+                                color "#ccccff"
+                                font FONT
+
+                            if entry["events"]:
+                                for e in entry["events"]:
+                                    $ cause_map = {
+                                        "wolf": "被狼人击杀",
+                                        "poison": "被女巫毒死",
+                                        "vote": "被投票出局",
+                                        "vote_saved": "被投票但白痴免死",
+                                        "hunter_shoot": "被猎人击杀"
+                                    }
+                                    $ txt = "{}号 （{}） {}".format(e["player"]+1, str(role_cn(e["role"])), cause_map.get(e["cause"], e["cause"]))
+                                    text txt:
+                                        size 26
+                                        color "#ffffff"
+                                        font FONT
+                            else:
+                                text "无事件":
+                                    size 24
+                                    color "#888888"
+                                    font FONT
+
+                            if entry.get("actions"):
+                                for act in entry["actions"]:
+                                    if act["type"] == "wolf_kill":
+                                        $ part_txt = "，".join(["{}号".format(i+1) for i in act.get("participants", [])])
+                                        $ txt = "狼人（{}）选择击杀：{}号玩家".format(part_txt if part_txt else "未知", act["target"]+1)
+                                    elif act["type"] == "prophet_check":
+                                        $ res_txt = "狼人" if act["result"] else "好人"
+                                        $ txt = "预言家查验：{}号玩家 → {}".format(act["target"]+1, res_txt)
+                                    elif act["type"] == "guard":
+                                        if act["target"] >= 0:
+                                            $ txt = "守卫守护：{}号玩家".format(act["target"]+1)
+                                        else:
+                                            $ txt = "守卫未守护"
+                                    elif act["type"] == "witch":
+                                        if act.get("target") is not None:
+                                            $ tgt_txt = "{}号玩家".format(act["target"]+1)
+                                        else:
+                                            $ tgt_txt = "无目标"
+                                        $ txt = "女巫行动（解药：{}，毒药：{}，目标：{}）".format("已用" if act["save_used"] else "未用", "已用" if act["poison_used"] else "未用", tgt_txt)
+                                    elif act["type"] == "elder":
+                                        $ txt = "长老禁言 {} 号".format(str(act["targets"]))
+                                    elif act["type"] == "hunter_shoot":
+                                        $ txt = "猎人带走 {} 号".format(str(act["target"]))
+                                    else:
+                                        $ txt = "未知行动"
+                                    text txt:
+                                        size 24
+                                        color "#cccccc"
+                                        font FONT
+
+    vbox:
+        xalign 0.5
+        yalign 0.92
+
+        button:
+            xsize 300
+            ysize 70
+            background Frame(Solid("#333333"), 0, 0)
+            hover_background Frame(Solid("#555555"), 0, 0)
+            action Return()
+
+            text "返回":
+                xalign 0.5
+                yalign 0.5
+                size 30
                 color "#ffffff"
                 font FONT

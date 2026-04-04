@@ -1,53 +1,63 @@
 init python:
-    def hunter_shoot_resolve(target):
-        global players
+    def reset_night_events():
+        renpy.store.night_events = {
+            "wolf_kill": None,
+            "witch_poison": None,
+            "witch_save": None,
+            "guard_protect": None,
+        }
 
-        # 判断击杀的是哪一层
-        if players[target]["top_alive"]:
-            layer = "top"
-            role = players[target]["top"]
-            players[target]["top_alive"] = False
-        elif players[target]["bottom_alive"]:
-            layer = "bottom"
-            role = players[target]["bottom"]
-            players[target]["bottom_alive"] = False
-        else:
+    def hunter_shoot_resolve(target):
+        # 立即结算：造成1点伤害（只击杀一层），并记录日志
+        if not hasattr(renpy.store, "players"):
             return
 
-        # 写入日志
-        if current_phase_log is not None:
-            current_phase_log["events"].append({
-                "player": target,
-                "role": role,
-                "layer": layer,
-                "cause": "hunter_shoot"
-            })
+        players = renpy.store.players
+        p = players[target]
+
+        # 执行一次伤害（优先扣上层）
+        if p["top_alive"]:
+            p["top_alive"] = False
+            layer = "上"
+            dying_role = players[target]["top"]
+            layer = "top"
+        elif p["bottom_alive"]:
+            p["bottom_alive"] = False
+            layer = "下"
+            dying_role = players[target]["bottom"]
+            layer = "bottom"
+        else:
+            # 已经死透，无事发生
+            return
+
+        current_phase_log["events"].append({
+            "cause": "hunter_shoot",
+            "player": target,
+            "role": dying_role,
+            "layer": layer
+        })
 
     def wolf_kill_resolve(target):
-        global night_deaths
-        if target not in night_deaths:
-            night_deaths.append(target)
+        # 确保 night_events 已初始化
+        if not hasattr(renpy.store, "night_events"):
+            reset_night_events()
+        renpy.store.night_events["wolf_kill"] = target
 
     def witch_resolve(action, kill_target, p_target):
-        global witch_save_used, witch_poison_used, night_deaths, players
+        global witch_save_used, witch_poison_used, _last_witch_target
+
+        # 确保 night_events 已初始化
+        if not hasattr(renpy.store, "night_events"):
+            reset_night_events()
+
         if action == "save":
             witch_save_used = True
-            renpy.store._last_witch_target = kill_target
-            # 核心修复：从死亡列表中移除狼人目标
-            if kill_target in night_deaths:
-                night_deaths.remove(kill_target)
+            renpy.store.night_events["witch_save"] = True   # 开关式
 
         elif action == "poison":
             witch_poison_used = True
-            renpy.store._last_witch_target = p_target
-            players[p_target]["poisoned_by_witch"] = True
-            if p_target not in night_deaths:
-                night_deaths.append(p_target)
-
-        # 若不行动或毒人，狼人击杀目标照常加入 night_deaths
-        if action != "save" and kill_target >= 0:
-            if kill_target not in night_deaths:
-                night_deaths.append(kill_target)
+            _last_witch_target = p_target
+            renpy.store.night_events["witch_poison"] = p_target
 
     def elder_silence_resolve(target):
         global silenced_player

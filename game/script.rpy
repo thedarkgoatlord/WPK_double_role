@@ -484,6 +484,70 @@ init python:
             return False, "需要至少一名双民玩家"
         return True, ""
 
+    # ─────────────────────────────────────────────
+    # 夜晚结算系统（统一伤害模型 + 奶穿机制）
+    # ─────────────────────────────────────────────
+
+    def resolve_night(players, night_events):
+        """
+        players: list of player objects, each must have .lives
+        night_events: {
+            "wolf_kill": int or None,
+            "witch_poison": int or None,
+            "witch_save": int or None,
+            "guard_protect": int or None,
+        }
+        """
+
+        wolf_target   = night_events.get("wolf_kill")
+        poison_target = night_events.get("witch_poison")
+        save_target   = night_events.get("witch_save")
+        guard_target  = night_events.get("guard_protect")
+
+        # 兼容：如果女巫救是“开关式”（True 表示救狼人刀目标）
+        if save_target is True:
+            save_target = wolf_target
+
+        damage_map = {}
+
+        # —— 狼人伤害（可被守卫拦截）——
+        if wolf_target is not None:
+            if wolf_target != guard_target:
+                damage_map[wolf_target] = damage_map.get(wolf_target, 0) + 1
+            # 被守卫挡掉则不计入伤害
+
+        # —— 女巫毒（必定生效）——
+        if poison_target is not None:
+            damage_map[poison_target] = damage_map.get(poison_target, 0) + 1
+
+        # 奶穿：狼人刀 + 守卫守 + 女巫救 同一人 → 强制 +1 伤害
+        if wolf_target is not None:
+            if wolf_target == guard_target and wolf_target == save_target:
+                damage_map[wolf_target] = damage_map.get(wolf_target, 0) + 1
+
+        # —— 女巫救（仅在没有奶穿时生效）——
+        if save_target is not None:
+            # 非奶穿时才生效
+            if not (wolf_target is not None and save_target == wolf_target and save_target == guard_target):
+                if save_target in damage_map:
+                    damage_map[save_target] -= 1
+                    if damage_map[save_target] <= 0:
+                        del damage_map[save_target]
+    
+        # —— 统一扣命（基于上下层结构）——
+        for target, dmg in damage_map.items():
+            p = players[target]
+
+            for _ in range(dmg):
+                # 优先扣上层
+                if p["top_alive"]:
+                    p["top_alive"] = False
+                elif p["bottom_alive"]:
+                    p["bottom_alive"] = False
+                else:
+                    # 已经死透，不再处理
+                    break
+
 screen screen_manual_assign(count):
     """
     手动分配界面。
