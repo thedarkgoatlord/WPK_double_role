@@ -55,7 +55,12 @@ label select_player_count:
 
 
 label generate_roles:
-    $ assignment = generate_assignment(player_count)
+    call screen screen_assign_method
+    if _return == "random":
+        $ assignment = generate_assignment(player_count)
+    else:
+        call screen screen_manual_assign(player_count)
+        $ assignment = _return
     $ current_reveal_player = 1
     jump distribute_roles
 
@@ -362,4 +367,505 @@ screen screen_distribute_done():
                     yalign 0.5
                     size 38
                     color "#ddcccc"
+                    font "SourceHanSansLite.ttf"
+
+
+## ── 选择分配方式 ────────────────────────────────────────────────────────────
+screen screen_assign_method():
+    add Solid("#0d0d1a")
+    vbox:
+        xalign 0.5
+        yalign 0.40
+        spacing 60
+
+        text "选择角色分配方式":
+            xalign 0.5
+            size 60
+            color "#99ccff"
+            font "SourceHanSansLite.ttf"
+
+        hbox:
+            xalign 0.5
+            spacing 120
+
+            button:
+                xsize 340
+                ysize 220
+                background Frame(Solid("#1a3322"), 0, 0)
+                hover_background Frame(Solid("#2a5533"), 0, 0)
+                action Return("random")
+                vbox:
+                    xalign 0.5
+                    yalign 0.5
+                    spacing 18
+                    text "🎲":
+                        xalign 0.5
+                        size 64
+                    text "随机分配":
+                        xalign 0.5
+                        size 40
+                        color "#88ffaa"
+                        font "SourceHanSansLite.ttf"
+                    text "系统自动生成合法卡组":
+                        xalign 0.5
+                        size 26
+                        color "#66aa77"
+                        font "SourceHanSansLite.ttf"
+
+            button:
+                xsize 340
+                ysize 220
+                background Frame(Solid("#22223a"), 0, 0)
+                hover_background Frame(Solid("#33336a"), 0, 0)
+                action Return("manual")
+                vbox:
+                    xalign 0.5
+                    yalign 0.5
+                    spacing 18
+                    text "✋":
+                        xalign 0.5
+                        size 64
+                    text "手动分配":
+                        xalign 0.5
+                        size 40
+                        color "#aabbff"
+                        font "SourceHanSansLite.ttf"
+                    text "法官自行决定每人的卡组":
+                        xalign 0.5
+                        size 26
+                        color "#7788aa"
+                        font "SourceHanSansLite.ttf"
+
+
+## ── 手动分配界面 ─────────────────────────────────────────────────────────────
+init python:
+    def _get_role_pool(count):
+        """返回当前人数对应的角色池列表（带重复）。"""
+        import copy
+        return list(ROLE_POOLS.get(count, []))
+
+    def _place_role(slots, selected, role):
+        """将 role 放入 slots[selected[0]][selected[1]]，返回新的 slots 副本。"""
+        si, li = selected
+        return [
+            [role if (ii == si and layer == li) else v
+            for layer, v in enumerate(pair)]
+            for ii, pair in enumerate(slots)
+        ]
+
+    def _apply_place_and_set(slots, selected, role):
+        new_slots = _place_role(slots, selected, role)
+        renpy.set_screen_variable("slots", new_slots)
+
+    def _manual_assign_valid(slots, count):
+        """
+        验证手动分配是否合法：
+        1. 每个槽的上下都已填写
+        2. 所有槽使用的牌恰好用完角色池
+        3. 没有 BAD_COMBOS 组合
+        4. 至少有一对 SAFE_PAIRS（双民组合）
+        """
+        flat = []
+        for top, bot in slots:
+            if top is None or bot is None:
+                return False, "还有空槽未填满"
+            flat.append(top)
+            flat.append(bot)
+        pool = _get_role_pool(count)
+        flat_sorted = sorted(flat)
+        pool_sorted = sorted(pool)
+        if flat_sorted != pool_sorted:
+            return False, "牌的数量与角色池不符"
+        for top, bot in slots:
+            if (top, bot) in BAD_COMBOS:
+                return False, "存在非法组合：{}+{}".format(top, bot)
+        has_safe = any((top, bot) in SAFE_PAIRS for top, bot in slots)
+        if not has_safe:
+            return False, "需要至少一名双民玩家"
+        return True, ""
+
+screen screen_manual_assign(count):
+    """
+    手动分配界面。
+    slots: list of [top_role, bottom_role] or [None, None]
+    selected: (slot_index, layer) 当前正在编辑的格子，None 表示无
+    """
+    add Solid("#0b0b18")
+
+    $ n = count
+    $ pool_all = _get_role_pool(n)
+
+    # slots[i] = [top, bottom]，初始全 None
+    default slots = [[None, None] for _ in range(n)]
+    # (slot_index, "top"/"bottom") 正在选择的格子
+    default selected = None
+    # 用量统计：当前已放入槽中的每种角色数量
+    default used = {}
+
+    python:
+        # 重新计算 used
+        used = {}
+        for top, bot in slots:
+            if top:
+                used[top] = used.get(top, 0) + 1
+            if bot:
+                used[bot] = used.get(bot, 0) + 1
+
+        # 各角色总量
+        pool_count = {}
+        for r in pool_all:
+            pool_count[r] = pool_count.get(r, 0) + 1
+
+        # 合法性检查
+        ok, err_msg = _manual_assign_valid(slots, n)
+
+        # 当前已选槽位可用的牌（未超出配额）
+        def can_place(role):
+            return used.get(role, 0) < pool_count.get(role, 0)
+
+        # 按 WOLF / SPECIAL / CIVIL 分组方便展示
+        ROLE_ORDER = [
+            "Werewolf", "Hidden Werewolf",
+            "Prophet", "Witch", "Hunter", "Guard", "Idiot", "Silencer",
+            "Duplicate", "Villager",
+        ]
+        unique_roles = [r for r in ROLE_ORDER if r in pool_count]
+
+    vbox:
+        xalign 0.5
+        yalign 0.0
+        spacing 0
+
+        # ── 标题栏 ──────────────────────────────────────────────────────────
+        frame:
+            xfill True
+            ysize 72
+            background Frame(Solid("#111122"), 0, 0)
+            padding (30, 0, 30, 0)
+            hbox:
+                yalign 0.5
+                spacing 0
+                text "✋  手动分配卡组  —  {}人局".format(n):
+                    yalign 0.5
+                    size 38
+                    color "#99ccff"
+                    font "SourceHanSansLite.ttf"
+                null width 40
+                if err_msg and not ok:
+                    text "⚠ {}".format(err_msg):
+                        yalign 0.5
+                        size 28
+                        color "#ffaa44"
+                        font "SourceHanSansLite.ttf"
+
+        null height 16
+
+        hbox:
+            xalign 0.5
+            spacing 40
+
+            # ── 左栏：角色池 ────────────────────────────────────────────────
+            vbox:
+                xsize 320
+                spacing 10
+
+                text "角色池":
+                    xalign 0.5
+                    size 30
+                    color "#aaaacc"
+                    font "SourceHanSansLite.ttf"
+
+                text "（点击角色后，再点槽位放置）":
+                    xalign 0.5
+                    size 22
+                    color "#666677"
+                    font "SourceHanSansLite.ttf"
+
+                null height 6
+
+                for role in unique_roles:
+                    $ remaining = pool_count[role] - used.get(role, 0)
+                    $ rc = role_color(role)
+                    $ dim = remaining <= 0
+                    $ rc_bg = "#1a1a2a" if dim else rc
+                    $ label_text = "{}  ×{}".format(role_cn(role), remaining)
+                    button:
+                        xsize 300
+                        ysize 60
+                        background Frame(Solid(rc_bg), 0, 0)
+                        hover_background Frame(Solid("#555566" if dim else rc), 0, 0)
+                        sensitive (selected is not None and not dim)
+                        action If(
+                            selected is not None and not dim,
+                            [
+                                Function(_apply_place_and_set, slots, selected, role),
+                                SetScreenVariable("selected", None),
+                            ]
+                        )
+                        hbox:
+                            xalign 0.5
+                            yalign 0.5
+                            spacing 12
+                            frame:
+                                xsize 16
+                                ysize 16
+                                background Frame(Solid(rc if not dim else "#333333"), 0, 0)
+                            text label_text:
+                                yalign 0.5
+                                size 28
+                                color ("#444455" if dim else "#111111")
+                                font "SourceHanSansLite.ttf"
+
+            # ── 右栏：玩家槽位 ──────────────────────────────────────────────
+            vbox:
+                spacing 14
+
+                text "玩家卡组":
+                    xalign 0.5
+                    size 30
+                    color "#aaaacc"
+                    font "SourceHanSansLite.ttf"
+
+                text "（先选角色，再点这里的上/下牌位置放置；点已放的牌可清除）":
+                    xalign 0.5
+                    size 22
+                    color "#666677"
+                    font "SourceHanSansLite.ttf"
+
+                null height 4
+
+                # 两列并排显示玩家
+                hbox:
+                    spacing 20
+
+                    # 左列（偶数 index：0, 2, 4, 6）
+                    vbox:
+                        spacing 10
+                        for i in range(0, n, 2):
+                            $ top_r  = slots[i][0]
+                            $ bot_r  = slots[i][1]
+                            $ sel_top = (selected == (i, 0))
+                            $ sel_bot = (selected == (i, 1))
+                            frame:
+                                xsize 560
+                                ysize 110
+                                background Frame(Solid("#181826"), 0, 0)
+                                padding (12, 8, 12, 8)
+                                hbox:
+                                    yalign 0.5
+                                    spacing 14
+
+                                    text "{}号".format(i+1):
+                                        yalign 0.5
+                                        size 28
+                                        color "#aaaacc"
+                                        font "SourceHanSansLite.ttf"
+
+                                    vbox:
+                                        spacing 6
+                                        # 上牌槽
+                                        button:
+                                            xsize 220
+                                            ysize 44
+                                            background Frame(Solid(
+                                                "#334488" if sel_top else
+                                                (role_color(top_r) if top_r else "#222233")
+                                            ), 0, 0)
+                                            hover_background Frame(Solid("#4455aa"), 0, 0)
+                                            action If(
+                                                top_r is not None,
+                                                # 已有牌 → 清除
+                                                [
+                                                    SetScreenVariable("slots",
+                                                        [[None if (ii==i and li==0) else v
+                                                        for li, v in enumerate(pair)]
+                                                        for ii, pair in enumerate(slots)]),
+                                                    SetScreenVariable("selected", None),
+                                                ],
+                                                # 空槽 → 选中等待
+                                                SetScreenVariable("selected", (i, 0))
+                                            )
+                                            text ("上：{}" .format(role_cn(top_r)) if top_r else ("▶ 点击选上牌" if sel_top else "上牌 (空)")):
+                                                xalign 0.5
+                                                yalign 0.5
+                                                size 24
+                                                color ("#111111" if top_r else ("#ffffff" if sel_top else "#555566"))
+                                                font "SourceHanSansLite.ttf"
+
+                                        # 下牌槽
+                                        button:
+                                            xsize 220
+                                            ysize 44
+                                            background Frame(Solid(
+                                                "#334488" if sel_bot else
+                                                (role_color(bot_r) if bot_r else "#222233")
+                                            ), 0, 0)
+                                            hover_background Frame(Solid("#4455aa"), 0, 0)
+                                            action If(
+                                                bot_r is not None,
+                                                [
+                                                    SetScreenVariable("slots",
+                                                        [[None if (ii==i and li==1) else v
+                                                          for li, v in enumerate(pair)]
+                                                         for ii, pair in enumerate(slots)]),
+                                                    SetScreenVariable("selected", None),
+                                                ],
+                                                SetScreenVariable("selected", (i, 1))
+                                            )
+                                            text ("下：{}".format(role_cn(bot_r)) if bot_r else ("▶ 点击选下牌" if sel_bot else "下牌 (空)")):
+                                                xalign 0.5
+                                                yalign 0.5
+                                                size 24
+                                                color ("#111111" if bot_r else ("#ffffff" if sel_bot else "#555566"))
+                                                font "SourceHanSansLite.ttf"
+
+                                    # 互换上下
+                                    button:
+                                        xsize 60
+                                        ysize 90
+                                        background Frame(Solid("#333344"), 0, 0)
+                                        hover_background Frame(Solid("#555566"), 0, 0)
+                                        sensitive (top_r is not None and bot_r is not None)
+                                        action SetScreenVariable("slots",
+                                            [[bot_r if (ii==i and li==0) else
+                                            top_r if (ii==i and li==1) else v
+                                            for li, v in enumerate(pair)]
+                                            for ii, pair in enumerate(slots)])
+                                        text "🔄":
+                                            xalign 0.5
+                                            yalign 0.5
+                                            size 30
+                                            color "#aaaacc"
+
+                    # 右列（奇数 index：1, 3, 5, 7）
+                    vbox:
+                        spacing 10
+                        for i in range(1, n, 2):
+                            $ top_r  = slots[i][0]
+                            $ bot_r  = slots[i][1]
+                            $ sel_top = (selected == (i, 0))
+                            $ sel_bot = (selected == (i, 1))
+                            frame:
+                                xsize 560
+                                ysize 110
+                                background Frame(Solid("#181826"), 0, 0)
+                                padding (12, 8, 12, 8)
+                                hbox:
+                                    yalign 0.5
+                                    spacing 14
+
+                                    text "{}号".format(i+1):
+                                        yalign 0.5
+                                        size 28
+                                        color "#aaaacc"
+                                        font "SourceHanSansLite.ttf"
+
+                                    vbox:
+                                        spacing 6
+                                        button:
+                                            xsize 220
+                                            ysize 44
+                                            background Frame(Solid(
+                                                "#334488" if sel_top else
+                                                (role_color(top_r) if top_r else "#222233")
+                                            ), 0, 0)
+                                            hover_background Frame(Solid("#4455aa"), 0, 0)
+                                            action If(
+                                                top_r is not None,
+                                                [
+                                                    SetScreenVariable("slots",
+                                                        [[None if (ii==i and li==0) else v
+                                                          for li, v in enumerate(pair)]
+                                                         for ii, pair in enumerate(slots)]),
+                                                    SetScreenVariable("selected", None),
+                                                ],
+                                                SetScreenVariable("selected", (i, 0))
+                                            )
+                                            text ("上：{}".format(role_cn(top_r)) if top_r else ("▶ 点击选上牌" if sel_top else "上牌 (空)")):
+                                                xalign 0.5
+                                                yalign 0.5
+                                                size 24
+                                                color ("#111111" if top_r else ("#ffffff" if sel_top else "#555566"))
+                                                font "SourceHanSansLite.ttf"
+
+                                        button:
+                                            xsize 220
+                                            ysize 44
+                                            background Frame(Solid(
+                                                "#334488" if sel_bot else
+                                                (role_color(bot_r) if bot_r else "#222233")
+                                            ), 0, 0)
+                                            hover_background Frame(Solid("#4455aa"), 0, 0)
+                                            action If(
+                                                bot_r is not None,
+                                                [
+                                                    SetScreenVariable("slots",
+                                                        [[None if (ii==i and li==1) else v
+                                                          for li, v in enumerate(pair)]
+                                                         for ii, pair in enumerate(slots)]),
+                                                    SetScreenVariable("selected", None),
+                                                ],
+                                                SetScreenVariable("selected", (i, 1))
+                                            )
+                                            text ("下：{}".format(role_cn(bot_r)) if bot_r else ("▶ 点击选下牌" if sel_bot else "下牌 (空)")):
+                                                xalign 0.5
+                                                yalign 0.5
+                                                size 24
+                                                color ("#111111" if bot_r else ("#ffffff" if sel_bot else "#555566"))
+                                                font "SourceHanSansLite.ttf"
+
+                                    button:
+                                        xsize 60
+                                        ysize 90
+                                        background Frame(Solid("#333344"), 0, 0)
+                                        hover_background Frame(Solid("#555566"), 0, 0)
+                                        sensitive (top_r is not None and bot_r is not None)
+                                        action SetScreenVariable("slots",
+                                            [[bot_r if (ii==i and li==0) else
+                                              top_r if (ii==i and li==1) else v
+                                              for li, v in enumerate(pair)]
+                                             for ii, pair in enumerate(slots)])
+                                        text "🔄":
+                                            xalign 0.5
+                                            yalign 0.5
+                                            size 30
+                                            color "#aaaacc"
+
+        null height 20
+
+        # ── 底部按钮 ─────────────────────────────────────────────────────────
+        hbox:
+            xalign 0.5
+            spacing 60
+
+            # 清空全部
+            button:
+                xsize 240
+                ysize 72
+                background Frame(Solid("#442222"), 0, 0)
+                hover_background Frame(Solid("#663333"), 0, 0)
+                action [
+                    SetScreenVariable("slots", [[None, None] for _ in range(n)]),
+                    SetScreenVariable("selected", None),
+                ]
+                text "清空全部":
+                    xalign 0.5
+                    yalign 0.5
+                    size 32
+                    color "#ffaaaa"
+                    font "SourceHanSansLite.ttf"
+
+            # 确认（合法才能点）
+            button:
+                xsize 320
+                ysize 72
+                background Frame(Solid("#226633" if ok else "#1a3322"), 0, 0)
+                hover_background Frame(Solid("#338844" if ok else "#1a3322"), 0, 0)
+                sensitive ok
+                action Return([v for pair in slots for v in pair])
+                text "确认卡组  ▶":
+                    xalign 0.5
+                    yalign 0.5
+                    size 34
+                    color ("#ffffff" if ok else "#445544")
                     font "SourceHanSansLite.ttf"

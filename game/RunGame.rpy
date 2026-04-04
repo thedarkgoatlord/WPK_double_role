@@ -97,6 +97,7 @@ default game_log            = []   # 每天/每夜的事件记录
 default current_phase_log   = None # 当前阶段临时记录
 default silenced_player = None
 default _last_witch_target = None
+default _ending = None
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -267,6 +268,11 @@ label night_phase:
 
     $ game_log.append(current_phase_log)
 
+    # ── 夜晚结算后检测结局 ──
+    $ _ending = check_ending()
+    if _ending:
+        jump ending_check
+
     jump day_phase
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -293,6 +299,10 @@ label day_phase:
                 call screen screen_hunter_shoot(explode_idx)
             $ players[explode_idx]["bottom_alive"] = False
         call screen screen_explode_result(explode_idx)
+        # ── 自爆后检测结局 ──
+        $ _ending = check_ending()
+        if _ending:
+            jump ending_check
         jump night_phase
 
     else:
@@ -335,6 +345,10 @@ label day_phase:
                     $ players[vote_result]["bottom_alive"] = False
 
                 call screen screen_vote_result(vote_result)
+                # ── 投票出局后检测结局 ──
+                $ _ending = check_ending()
+                if _ending:
+                    jump ending_check
             $ game_log.append(current_phase_log)
         else:
             call screen screen_vote_tie
