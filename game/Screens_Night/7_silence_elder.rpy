@@ -61,31 +61,47 @@ screen screen_elder_turn(elder_idx):
 
         null height 20
 
-        if silence_target >= 0:
+        hbox:
+            xalign 0.5
+            spacing 40
+
+            # 确认禁言
+            if silence_target >= 0:
+                button:
+                    xsize 260
+                    ysize 80
+                    background Frame(Solid("#666633"), 0, 0)
+                    hover_background Frame(Solid("#888844"), 0, 0)
+                    action [Function(elder_silence_resolve, silence_target), Return()]
+                    text "确认禁言":
+                        xalign 0.5
+                        yalign 0.5
+                        size 34
+                        color "#ffffff"
+                        font FONT
+            else:
+                button:
+                    xsize 260
+                    ysize 80
+                    background Frame(Solid("#222222"), 0, 0)
+                    action NullAction()
+                    text "请选择目标":
+                        xalign 0.5
+                        yalign 0.5
+                        size 34
+                        color "#555555"
+                        font FONT
+
+            # 跳过行动
             button:
-                xsize 340
+                xsize 260
                 ysize 80
-                background Frame(Solid("#666633"), 0, 0)
-                hover_background Frame(Solid("#888844"), 0, 0)
-                action [Function(elder_silence_resolve, silence_target), Return()]
-                xalign 0.5
-                text "确认禁言":
+                background Frame(Solid("#444444"), 0, 0)
+                hover_background Frame(Solid("#666666"), 0, 0)
+                action Return()
+                text "不禁言":
                     xalign 0.5
                     yalign 0.5
                     size 34
                     color "#ffffff"
                     font FONT
-        else:
-            button:
-                xsize 340
-                ysize 80
-                background Frame(Solid("#222222"), 0, 0)
-                action NullAction()
-                xalign 0.5
-                text "请选择目标":
-                    xalign 0.5
-                    yalign 0.5
-                    size 34
-                    color "#555555"
-                    font FONT
-
